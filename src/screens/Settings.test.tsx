@@ -1,13 +1,23 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto'
 import '@testing-library/jest-dom/vitest'
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Settings } from './Settings'
 import { renderWithApp } from '../test/renderWithApp'
 import { loadApiKey } from '../storage/prefs'
 import { DEFAULT_TAGS, type ScoutConfig, type TagDef } from '../types'
+
+// Mock licenseRenewal so we can control outcomes in renew-now tests
+vi.mock('../lib/licenseRenewal', async (importActual) => {
+  const actual = await importActual<typeof import('../lib/licenseRenewal')>()
+  return {
+    ...actual,
+    // DEFAULT_RENEWAL_URL kept as empty string (same as actual) unless overridden per-test
+    maybeRenewLicense: vi.fn(actual.maybeRenewLicense),
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -212,9 +222,9 @@ describe('Settings screen', () => {
     expect(saved.ai.provider).toBe('anthropic')
   })
 
-  // ---- license key input persists on blur ----
+  // ---- license key textarea persists on blur ----
 
-  it('license key input persists via updateConfig on blur', async () => {
+  it('license key textarea persists via updateConfig on blur', async () => {
     const user = userEvent.setup()
     const { app } = renderWithApp(<Settings />, { config: { ...BASE_CONFIG, licenseKey: '' } })
 
@@ -226,5 +236,128 @@ describe('Settings screen', () => {
     await waitFor(() => expect(app.updateConfig).toHaveBeenCalled())
     const saved = app.updateConfig.mock.calls.at(-1)?.[0] as ScoutConfig
     expect(saved.licenseKey).toBe('SCOUT-1234-ABCD-EFGH')
+  })
+
+  // ---- license status: 未設定 for empty key ----
+
+  it('license status shows 未設定 / Not set for empty licenseKey', () => {
+    renderWithApp(<Settings />, { config: { ...BASE_CONFIG, language: 'ja', licenseKey: '' } })
+    expect(screen.getByText('未設定')).toBeInTheDocument()
+  })
+
+  it('license status shows Not set for empty licenseKey (English)', () => {
+    renderWithApp(<Settings />, { config: { ...BASE_CONFIG, language: 'en', licenseKey: '' } })
+    expect(screen.getByText('Not set')).toBeInTheDocument()
+  })
+
+  // ---- license status: 無効なキー for garbage input ----
+
+  it('license status shows 無効なキー for garbage token', async () => {
+    const user = userEvent.setup()
+    renderWithApp(<Settings />, { config: { ...BASE_CONFIG, language: 'ja', licenseKey: '' } })
+
+    const licenseInput = screen.getByPlaceholderText(/SCOUT-XXXX/i)
+    await user.type(licenseInput, 'hello')
+
+    await waitFor(() => expect(screen.getByText('無効なキー')).toBeInTheDocument())
+  })
+
+  it('license status shows Invalid key for garbage token (English)', async () => {
+    const user = userEvent.setup()
+    renderWithApp(<Settings />, { config: { ...BASE_CONFIG, language: 'en', licenseKey: '' } })
+
+    const licenseInput = screen.getByPlaceholderText(/SCOUT-XXXX/i)
+    await user.type(licenseInput, 'hello')
+
+    await waitFor(() => expect(screen.getByText('Invalid key')).toBeInTheDocument())
+  })
+
+  // ---- license status: valid rendering via mocked verifyLicense ----
+
+  it('license status shows Valid + plan + sub + expiry for valid token', async () => {
+    // Mock verifyLicense to return a valid payload so we don't need a real signed token
+    const licenseModule = await import('../lib/license')
+    const spy = vi.spyOn(licenseModule, 'verifyLicense').mockReturnValue({
+      status: 'valid',
+      payload: {
+        v: 1,
+        lid: 'lic-001',
+        sub: 'alice@example.com',
+        plan: 'pro',
+        iat: 1700000000,
+        exp: 2000000000,
+        kid: 'k1',
+      },
+    })
+
+    renderWithApp(<Settings />, {
+      config: { ...BASE_CONFIG, language: 'en', licenseKey: 'SCOUT1.fake.token' },
+    })
+
+    expect(screen.getByText('Valid')).toBeInTheDocument()
+    expect(screen.getByText('Pro')).toBeInTheDocument()
+    expect(screen.getByText('alice@example.com')).toBeInTheDocument()
+
+    spy.mockRestore()
+  })
+
+  // ---- renew now: 'renewed' outcome updates field and calls updateConfig ----
+
+  it("renew now with 'renewed' outcome updates licenseKey and calls updateConfig", async () => {
+    // We need DEFAULT_RENEWAL_URL to be non-empty for the button to be enabled,
+    // and verifyLicense to return a renewable status so the button is not disabled.
+    const licenseModule = await import('../lib/license')
+    const verifySpy = vi.spyOn(licenseModule, 'verifyLicense').mockReturnValue({
+      status: 'grace',
+      payload: {
+        v: 1,
+        lid: 'lic-001',
+        sub: 'alice@example.com',
+        plan: 'pro',
+        iat: 1700000000,
+        exp: 1700100000,
+        kid: 'k1',
+      },
+    })
+
+    const renewalModule = await import('../lib/licenseRenewal')
+    // Temporarily patch DEFAULT_RENEWAL_URL to a non-empty string
+    const originalUrl = renewalModule.DEFAULT_RENEWAL_URL
+    Object.defineProperty(renewalModule, 'DEFAULT_RENEWAL_URL', {
+      value: 'https://example.com/renew',
+      writable: true,
+      configurable: true,
+    })
+    const renewSpy = vi.mocked(renewalModule.maybeRenewLicense).mockResolvedValueOnce({
+      outcome: 'renewed',
+      token: 'SCOUT1.newtoken.newsig',
+    })
+
+    const user = userEvent.setup()
+    const { app } = renderWithApp(<Settings />, {
+      config: { ...BASE_CONFIG, language: 'en', licenseKey: 'SCOUT1.old.token' },
+    })
+
+    const renewBtn = screen.getByRole('button', { name: /renew now/i })
+    expect(renewBtn).not.toBeDisabled()
+    await user.click(renewBtn)
+
+    await waitFor(() => expect(renewSpy).toHaveBeenCalledWith('SCOUT1.old.token', { force: true }))
+
+    await waitFor(() =>
+      expect(app.updateConfig).toHaveBeenCalledWith(
+        expect.objectContaining({ licenseKey: 'SCOUT1.newtoken.newsig' }),
+      ),
+    )
+
+    await waitFor(() => expect(screen.getByText(/renewed successfully/i)).toBeInTheDocument())
+
+    // Restore
+    Object.defineProperty(renewalModule, 'DEFAULT_RENEWAL_URL', {
+      value: originalUrl,
+      writable: true,
+      configurable: true,
+    })
+    verifySpy.mockRestore()
   })
 })

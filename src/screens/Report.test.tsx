@@ -10,6 +10,17 @@ import type { Session } from '../types'
 import { saveApiKey } from '../storage/prefs'
 import { serializeSession } from '../lib/sessionFile'
 
+// verifyLicense does real Ed25519 verification against built-in public keys,
+// which test tokens can't satisfy. Mock at module level (deterministic across
+// parallel runs) with the real implementation as the default behavior.
+const { mockVerifyLicense } = vi.hoisted(() => ({ mockVerifyLicense: vi.fn() }))
+vi.mock('../lib/license', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/license')>()
+  mockVerifyLicense.mockImplementation(actual.verifyLicense)
+  return { ...actual, verifyLicense: mockVerifyLicense }
+})
+
+
 const SESSION: Session = {
   dirName: '2026-06-10-1430-report-test',
   charterId: '2026-R001',
@@ -180,6 +191,19 @@ describe('Report screen', () => {
   it('AI button visible when config has anthropic provider + licenseKey + localStorage API key', async () => {
     saveApiKey('test-api-key-123')
 
+    mockVerifyLicense.mockReturnValue({
+      status: 'valid',
+      payload: {
+        v: 1,
+        lid: 'lic-001',
+        sub: 'alice@example.com',
+        plan: 'pro',
+        iat: 1700000000,
+        exp: 2000000000,
+        kid: 'k1',
+      },
+    })
+
     renderWithApp(<Report session={SESSION} />, {
       ws,
       config: {
@@ -194,5 +218,9 @@ describe('Report screen', () => {
 
     // AI button should be present
     expect(screen.getByRole('button', { name: /✨.*AI.*整形|AI Format/i })).toBeInTheDocument()
+
+    mockVerifyLicense.mockReset()
+    const actual = await vi.importActual<typeof import('../lib/license')>('../lib/license')
+    mockVerifyLicense.mockImplementation(actual.verifyLicense)
   })
 })

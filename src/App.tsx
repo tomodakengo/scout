@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ScoutConfig } from './types'
 import { Workspace, type PermissionState } from './storage/store'
 import { loadPrefs, savePrefs } from './storage/prefs'
+import { maybeRenewLicense, RENEW_ATTEMPT_INTERVAL_MS } from './lib/licenseRenewal'
 import { SessionRunner } from './state/sessionRunner'
 import { AppCtx, useApp, type AppState, type Screen } from './appContext'
 import { tx } from './lib/i18n'
@@ -52,6 +53,27 @@ export function App() {
     window.addEventListener('focus', check)
     return () => window.removeEventListener('focus', check)
   }, [ws])
+
+  // automatic license renewal: on boot and every 6h while the app is open.
+  // No-op unless a renewal URL is configured and a license token is stored.
+  useEffect(() => {
+    let cancelled = false
+    const attempt = async () => {
+      const token = loadPrefs().licenseKey
+      const result = await maybeRenewLicense(token)
+      if (!cancelled && result.outcome === 'renewed') {
+        const fresh = { ...loadPrefs(), licenseKey: result.token }
+        savePrefs(fresh)
+        setConfig((c) => ({ ...c, licenseKey: result.token }))
+      }
+    }
+    void attempt()
+    const handle = window.setInterval(() => void attempt(), RENEW_ATTEMPT_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(handle)
+    }
+  }, [])
 
   const navigate = useCallback((s: Screen) => {
     if (s.name === 'home' || s.name === 'run') localStorage.setItem(ONBOARDED_KEY, '1')

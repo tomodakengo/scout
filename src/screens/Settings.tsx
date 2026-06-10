@@ -4,6 +4,8 @@ import { useApp } from '../appContext'
 import { loadApiKey, saveApiKey } from '../storage/prefs'
 import { supportsFsAccess } from '../storage/fs'
 import { tx } from '../lib/i18n'
+import { verifyLicense } from '../lib/license'
+import { maybeRenewLicense, DEFAULT_RENEWAL_URL } from '../lib/licenseRenewal'
 
 export function Settings({ onboarding }: { onboarding?: boolean }) {
   const { ws, config, updateConfig, lang, navigate, permission, reconnectFolder, pickFolder } =
@@ -12,6 +14,8 @@ export function Settings({ onboarding }: { onboarding?: boolean }) {
   const [draft, setDraft] = useState<ScoutConfig>(() => structuredClone(config))
   const [apiKey, setApiKey] = useState<string>(() => loadApiKey())
   const [tagErrors, setTagErrors] = useState<Record<number, string>>({})
+  const [renewBusy, setRenewBusy] = useState(false)
+  const [renewMessage, setRenewMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   // Track latest draft in a ref to avoid stale closures in debounced calls
   const draftRef = useRef(draft)
@@ -452,15 +456,152 @@ export function Settings({ onboarding }: { onboarding?: boolean }) {
         </p>
         <div className="field">
           <label>{tx(lang, { ja: 'ライセンスキー', en: 'License key' })}</label>
-          <input
-            type="text"
+          <textarea
+            rows={3}
             value={draft.licenseKey}
             placeholder="SCOUT-XXXX-XXXX-XXXX"
-            style={{ width: '100%', maxWidth: 360 }}
-            onChange={(e) => setDraft({ ...draft, licenseKey: e.target.value })}
+            style={{ width: '100%', maxWidth: 480, resize: 'vertical', fontFamily: 'monospace', fontSize: 12 }}
+            onChange={(e) => {
+              setDraft({ ...draft, licenseKey: e.target.value })
+              setRenewMessage(null)
+            }}
             onBlur={() => persist({ ...draft })}
           />
         </div>
+
+        {/* Live status line */}
+        {(() => {
+          const info = verifyLicense(draft.licenseKey)
+          const { status, payload } = info
+          if (status === 'none') {
+            return (
+              <div className="row" style={{ marginTop: 6 }}>
+                <span className="dot gray" />
+                <span className="muted small">{tx(lang, { ja: '未設定', en: 'Not set' })}</span>
+              </div>
+            )
+          }
+          if (status === 'invalid') {
+            return (
+              <div style={{ marginTop: 6 }}>
+                <div className="row">
+                  <span className="dot red" />
+                  <span className="small" style={{ color: 'var(--red)' }}>
+                    {tx(lang, { ja: '無効なキー', en: 'Invalid key' })}
+                  </span>
+                </div>
+                {info.reason && (
+                  <div className="muted small" style={{ marginTop: 2 }}>{info.reason}</div>
+                )}
+              </div>
+            )
+          }
+          if (status === 'valid' && payload) {
+            const planLabel = payload.plan === 'pro' ? 'Pro' : payload.plan
+            const expDate = new Date(payload.exp * 1000).toLocaleDateString()
+            return (
+              <div className="row" style={{ marginTop: 6, flexWrap: 'wrap', gap: 6 }}>
+                <span className="dot green" />
+                <span className="small" style={{ color: 'var(--green)' }}>
+                  {tx(lang, { ja: '有効', en: 'Valid' })}
+                </span>
+                <span className="tag-chip" style={{ background: 'var(--accent)' }}>{planLabel}</span>
+                <span className="muted small">{payload.sub}</span>
+                <span className="muted small">〜{expDate}</span>
+              </div>
+            )
+          }
+          if (status === 'grace' && payload) {
+            const expDate = new Date((payload.exp + 14 * 86400) * 1000).toLocaleDateString()
+            return (
+              <div className="row" style={{ marginTop: 6, flexWrap: 'wrap', gap: 6 }}>
+                <span className="tag-chip" style={{ background: 'var(--yellow)', color: '#000' }}>
+                  {tx(lang, { ja: `更新猶予期間中（〜${expDate}）`, en: `In grace period (~${expDate})` })}
+                </span>
+              </div>
+            )
+          }
+          if (status === 'expired' && payload) {
+            const expDate = new Date(payload.exp * 1000).toLocaleDateString()
+            return (
+              <div className="row" style={{ marginTop: 6, flexWrap: 'wrap', gap: 6 }}>
+                <span className="dot red" />
+                <span className="small" style={{ color: 'var(--red)' }}>
+                  {tx(lang, { ja: '期限切れ', en: 'Expired' })}
+                </span>
+                <span className="muted small">〜{expDate}</span>
+              </div>
+            )
+          }
+          return null
+        })()}
+
+        {/* Renew now button */}
+        <div className="row" style={{ marginTop: 10, flexWrap: 'wrap', gap: 8 }}>
+          <button
+            disabled={
+              renewBusy ||
+              !DEFAULT_RENEWAL_URL ||
+              (() => {
+                const { status } = verifyLicense(draft.licenseKey)
+                return status === 'none' || status === 'invalid'
+              })()
+            }
+            onClick={async () => {
+              setRenewBusy(true)
+              setRenewMessage(null)
+              try {
+                const result = await maybeRenewLicense(draft.licenseKey, { force: true })
+                if (result.outcome === 'renewed') {
+                  const next = { ...draft, licenseKey: result.token }
+                  setDraft(next)
+                  persist(next)
+                  setRenewMessage({
+                    type: 'success',
+                    text: tx(lang, { ja: '更新しました', en: 'Renewed successfully' }),
+                  })
+                } else {
+                  setRenewMessage({
+                    type: 'error',
+                    text: result.reason,
+                  })
+                }
+              } finally {
+                setRenewBusy(false)
+              }
+            }}
+          >
+            {renewBusy
+              ? tx(lang, { ja: '更新中…', en: 'Renewing…' })
+              : tx(lang, { ja: '今すぐ更新', en: 'Renew now' })}
+          </button>
+          {renewMessage && (
+            <span
+              className="small"
+              style={{ color: renewMessage.type === 'success' ? 'var(--green)' : 'var(--red)' }}
+            >
+              {renewMessage.text}
+            </span>
+          )}
+        </div>
+
+        {/* Renewal endpoint note */}
+        {!DEFAULT_RENEWAL_URL && (
+          <p className="muted small" style={{ margin: '8px 0 0' }}>
+            {tx(lang, {
+              ja: '自動更新エンドポイント未設定（ビルド時に VITE_LICENSE_RENEWAL_URL を指定）',
+              en: 'Renewal endpoint not configured (set VITE_LICENSE_RENEWAL_URL at build time)',
+            })}
+          </p>
+        )}
+
+        {/* Privacy note */}
+        <p className="muted small" style={{ margin: '8px 0 0' }}>
+          {tx(lang, {
+            ja: '自動更新はライセンストークンのみを送信し、セッションデータは一切送信しません',
+            en: 'Auto-renewal sends only the license token, never session data',
+          })}
+        </p>
       </div>
 
       {/* Onboarding: Get started button at bottom */}

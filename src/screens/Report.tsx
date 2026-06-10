@@ -10,6 +10,7 @@ import { tx } from '../lib/i18n'
 import { buildReport, buildBugTicket } from '../lib/reportFormats'
 import { exportSessionZip, downloadBlob, downloadText } from '../storage/zipExport'
 import { loadApiKey } from '../storage/prefs'
+import { isPro, verifyLicense } from '../lib/license'
 
 type FormatOption = ReportFormat | 'zip'
 
@@ -39,8 +40,9 @@ export function Report({ session }: { session: Session }) {
 
   const bugEntries: TimelineEntry[] = session.entries.filter((e) => e.tag === 'BUG')
 
+  // Pro gate: the license must carry a valid (or in-grace) Ed25519 signature
   const showAiButton =
-    config.ai.provider !== 'none' && !!config.licenseKey && !!loadApiKey()
+    config.ai.provider !== 'none' && isPro(verifyLicense(config.licenseKey)) && !!loadApiKey()
 
   async function handleCopy() {
     try {
