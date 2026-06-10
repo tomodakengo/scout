@@ -13,6 +13,39 @@ export async function forceFallbackMode(page: Page): Promise<void> {
   })
 }
 
+/**
+ * Replace getDisplayMedia with a self-painting canvas stream so screen-share
+ * tests run deterministically everywhere (no real display required).
+ * The stream handle is stored as window.__fakeStream so tests can stop tracks.
+ * Must be called before the first page.goto().
+ */
+export async function fakeDisplayMedia(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const fake = async (): Promise<MediaStream> => {
+      const canvas = document.createElement('canvas')
+      canvas.width = 1280
+      canvas.height = 720
+      const ctx = canvas.getContext('2d')!
+      const paint = () => {
+        ctx.fillStyle = '#2a6045'
+        ctx.fillRect(0, 0, 1280, 720)
+        ctx.fillStyle = '#fff'
+        ctx.font = '48px sans-serif'
+        ctx.fillText('FAKE SCREEN ' + Date.now(), 80, 120)
+      }
+      paint()
+      setInterval(paint, 200)
+      const stream = canvas.captureStream(5)
+      ;(window as unknown as { __fakeStream: MediaStream }).__fakeStream = stream
+      return stream
+    }
+    Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', {
+      value: fake,
+      configurable: true,
+    })
+  })
+}
+
 /** First-run onboarding → home. */
 export async function completeOnboarding(page: Page): Promise<void> {
   await page.goto('/')

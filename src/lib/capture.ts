@@ -34,6 +34,21 @@ export class ScreenCapture {
   async grabFrame(): Promise<Blob> {
     if (!this.video || !this.active) throw new Error('screen capture not active')
     const video = this.video
+    // the first frame may not have arrived right after start() resolves
+    if (video.videoWidth === 0) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('no video frame received')), 3000)
+        video.addEventListener(
+          'loadeddata',
+          () => {
+            clearTimeout(timer)
+            resolve()
+          },
+          { once: true },
+        )
+      })
+      if (video.videoWidth === 0) throw new Error('no video frame received')
+    }
     const canvas = document.createElement('canvas')
     canvas.width = video.videoWidth
     canvas.height = video.videoHeight

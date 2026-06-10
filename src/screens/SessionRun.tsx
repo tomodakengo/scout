@@ -29,6 +29,8 @@ export function SessionRun() {
   const [thumbs, setThumbs] = useState<Record<string, string>>({})
   const thumbUrlsRef = useRef<string[]>([])
   const [ending, setEnding] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
+  const toastTimerRef = useRef<number | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const captureRef = useRef<ScreenCapture>()
@@ -86,21 +88,60 @@ export function SessionRun() {
     [],
   )
 
-  const takeScreenshot = useCallback(async () => {
-    if (!capture.active || annotating) return
-    const blob = await capture.grabFrame()
-    const serial = runner.nextSerial()
-    // the untouched original is always persisted (immutable evidence, plan §2.5)
-    await ws.writeAttachment(snap.dirName, `${serial}-fullscreen.png`, blob)
-    setAnnotating({ blob, serial })
-  }, [capture, annotating, runner, ws, snap.dirName])
+  const showToast = useCallback((message: string) => {
+    if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current)
+    setToast(message)
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 3500)
+  }, [])
+  useEffect(
+    () => () => {
+      if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current)
+    },
+    [],
+  )
 
-  // global keys: F1-F3 modes, F9 screenshot
+  const takeScreenshot = useCallback(async () => {
+    if (annotating) return
+    if (snap.status === 'paused') {
+      showToast(
+        tx(lang, {
+          ja: '一時停止中はスクリーンショットを撮れません',
+          en: 'Screenshots are disabled while paused',
+        }),
+      )
+      return
+    }
+    if (!capture.active) {
+      showToast(
+        tx(lang, {
+          ja: '画面共有が開始されていません — 📷ボタンで開始してください',
+          en: 'Screen share is not active — start it with the 📷 button',
+        }),
+      )
+      return
+    }
+    try {
+      const blob = await capture.grabFrame()
+      const serial = runner.nextSerial()
+      // the untouched original is always persisted (immutable evidence, plan §2.5)
+      await ws.writeAttachment(snap.dirName, `${serial}-fullscreen.png`, blob)
+      setAnnotating({ blob, serial })
+    } catch {
+      showToast(
+        tx(lang, {
+          ja: 'スクリーンショットの取得に失敗しました',
+          en: 'Failed to capture a screenshot',
+        }),
+      )
+    }
+  }, [capture, annotating, runner, ws, snap.dirName, snap.status, lang, showToast])
+
+  // global keys: F1-F3 modes, F9 screenshot — inert while annotating
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'F1' || e.key === 'F2' || e.key === 'F3') {
         e.preventDefault()
-        runner.setMode(MODE_ORDER[Number(e.key[1]) - 1])
+        if (!annotating) runner.setMode(MODE_ORDER[Number(e.key[1]) - 1])
       } else if (e.key === 'F9') {
         e.preventDefault()
         void takeScreenshot()
@@ -108,7 +149,7 @@ export function SessionRun() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [runner, takeScreenshot])
+  }, [runner, takeScreenshot, annotating])
 
   const commitInput = () => {
     const text = input.trim()
@@ -116,7 +157,18 @@ export function SessionRun() {
     if (text.startsWith('>') && snap.entries.length > 0) {
       runner.addDetail(snap.entries.length - 1, text.replace(/^>\s*/, ''))
     } else {
-      runner.addEntry(pendingTag ?? MODE_DEFAULT_TAG[snap.mode], text)
+      const tag = pendingTag ?? MODE_DEFAULT_TAG[snap.mode]
+      runner.addEntry(tag, text)
+      // nudge correct TBS accounting: a bug found in test mode usually means
+      // investigation time starts now
+      if (tag === 'BUG' && snap.mode === 'test') {
+        showToast(
+          tx(lang, {
+            ja: 'バグ調査に入るなら F2 でモード切替（TBS計測）',
+            en: 'Switching to investigation? Press F2 to track it in TBS',
+          }),
+        )
+      }
     }
     setInput('')
     setPendingTag(null)
@@ -214,6 +266,7 @@ export function SessionRun() {
             </button>
           ))}
         </div>
+        <LiveTbsBar modeSeconds={snap.modeSeconds} />
         <span className="spacer" />
         {snap.flushError && (
           <span className="small" style={{ color: 'var(--red)' }}>
@@ -301,7 +354,15 @@ export function SessionRun() {
             <button
               onClick={() =>
                 void capture
-                  .start(() => setCaptureActive(false))
+                  .start(() => {
+                    setCaptureActive(false)
+                    showToast(
+                      tx(lang, {
+                        ja: '画面共有が終了しました — スクショには再開が必要です',
+                        en: 'Screen share ended — restart it to take screenshots',
+                      }),
+                    )
+                  })
                   .then(() => setCaptureActive(true))
                   .catch(() => setCaptureActive(false))
               }
@@ -321,6 +382,13 @@ export function SessionRun() {
           </span>
         </div>
       </div>
+
+      {/* transient feedback toast */}
+      {toast && (
+        <div className="toast" role="status">
+          {toast}
+        </div>
+      )}
 
       {/* pause overlay */}
       {snap.status === 'paused' && !ending && (
@@ -357,4 +425,36 @@ const MODE_LABEL: Record<SessionMode, { ja: string; en: string }> = {
   test: { ja: 'テスト', en: 'Test' },
   bug_investigation: { ja: 'バグ調査', en: 'Bug investigation' },
   setup: { ja: 'セットアップ', en: 'Setup' },
+}
+
+const MODE_COLOR: Record<SessionMode, string> = {
+  test: '#0091ff',
+  bug_investigation: '#e5484d',
+  setup: '#7d8590',
+}
+
+/** Live per-mode time split, so TBS is visible while testing (not only in debrief). */
+function LiveTbsBar({ modeSeconds }: { modeSeconds: Record<SessionMode, number> }) {
+  const total = MODE_ORDER.reduce((sum, m) => sum + modeSeconds[m], 0)
+  if (total === 0) return null
+  const pct = (m: SessionMode) => Math.round((modeSeconds[m] / total) * 100)
+  return (
+    <span
+      className="live-tbs"
+      title={MODE_ORDER.map((m) => `${m}: ${pct(m)}%`).join(' / ')}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+    >
+      <span className="tbs-bar" style={{ width: 120, height: 10 }}>
+        {MODE_ORDER.map((m) => (
+          <span
+            key={m}
+            style={{ width: `${(modeSeconds[m] / total) * 100}%`, background: MODE_COLOR[m] }}
+          />
+        ))}
+      </span>
+      <span className="muted small" style={{ fontVariantNumeric: 'tabular-nums' }}>
+        T{pct('test')} / B{pct('bug_investigation')} / S{pct('setup')}
+      </span>
+    </span>
+  )
 }
