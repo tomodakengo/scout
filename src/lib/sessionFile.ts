@@ -77,6 +77,9 @@ export function parseSession(text: string, dirName: string): Session {
   const { entries, debrief } = parseBody(body)
 
   const coverage = fm['coverage_percent']
+  // frontmatter coverage_percent is the single source of truth; mirror it into
+  // the debrief block so session.debrief.coveragePercent survives a reload
+  if (debrief && typeof coverage === 'number') debrief.coveragePercent = coverage
 
   return {
     dirName,
