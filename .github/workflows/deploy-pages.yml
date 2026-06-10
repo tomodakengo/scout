@@ -9,7 +9,6 @@ permissions:
   contents: read
   pages: write
   id-token: write
-  administration: write
 
 concurrency:
   group: pages
@@ -39,27 +38,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Enable GitHub Pages (idempotent)
-        uses: actions/github-script@v7
+        uses: actions/configure-pages@v5
         with:
-          script: |
-            try {
-              await github.rest.repos.createPagesSite({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                build_type: 'workflow',
-              });
-              core.info('GitHub Pages enabled.');
-            } catch (e) {
-              if (e.status === 409) {
-                core.info('GitHub Pages already enabled — updating build type.');
-                await github.rest.repos.updateInformationAboutPagesSite({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  build_type: 'workflow',
-                });
-              } else {
-                throw e;
-              }
-            }
+          enablement: true
       - id: deployment
         uses: actions/deploy-pages@v4
