@@ -31,11 +31,11 @@ function formatStarted(iso: string): string {
 }
 
 function formatCounts(counts: Record<string, number>, lang: 'ja' | 'en'): string {
-  const bug = counts['BUG'] ?? 0
-  const finding = counts['FINDING'] ?? 0
-  const bugLabel = lang === 'ja' ? 'Bug' : 'Bug'
+  // counts keys are lowercased tag names (plan.md §2.4: { bug: 3, finding: 5, ... })
+  const bug = counts['bug'] ?? 0
+  const finding = counts['finding'] ?? 0
   const findingLabel = lang === 'ja' ? '気づき' : 'Finding'
-  return `${bugLabel}:${bug} ${findingLabel}:${finding}`
+  return `Bug:${bug} ${findingLabel}:${finding}`
 }
 
 // ---------------------------------------------------------------------------

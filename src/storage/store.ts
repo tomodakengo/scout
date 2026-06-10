@@ -87,7 +87,12 @@ export class Workspace {
       const dir = await fs.ensureDir(this.root, path)
       await fs.writeFile(dir, name, blob)
     } else {
-      await idbSet('blobs', [...path, name].join('/'), blob)
+      // store bytes + type rather than the Blob itself — Blob cloning into
+      // IndexedDB is unreliable across environments
+      await idbSet('blobs', [...path, name].join('/'), {
+        type: blob.type,
+        bytes: await blob.arrayBuffer(),
+      })
     }
   }
 
@@ -108,11 +113,13 @@ export class Workspace {
       if (!dir) return null
       return fs.readBlobFile(dir, fileName)
     }
-    const v = await idbGet<string | Blob>(
+    const v = await idbGet<string | Blob | { type: string; bytes: ArrayBuffer }>(
       'blobs',
       ['sessions', dirName, 'attachments', fileName].join('/'),
     )
-    return v instanceof Blob ? v : null
+    if (v instanceof Blob) return v // legacy entries written before the bytes format
+    if (v && typeof v === 'object' && 'bytes' in v) return new Blob([v.bytes], { type: v.type })
+    return null
   }
 
   private async listFileNames(path: string[]): Promise<string[]> {
